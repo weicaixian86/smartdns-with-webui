@@ -1,0 +1,85 @@
+# 工作流名称：手动触发或推送代码到master分支时执行（仅编译deb包）
+name: 编译SmartDNS的deb安装包
+
+# 触发条件配置
+on:
+  workflow_dispatch:  # 允许通过GitHub Actions页面手动点击"Run workflow"触发
+  push:
+    branches: [master]  # 当代码推送到master分支时自动触发
+
+# 定义任务集合
+jobs:
+  # 构建任务：只编译deb安装包
+  build-deb:
+    runs-on: ubuntu-22.04  # 运行在Ubuntu 22.04环境（适合构建deb包）
+    strategy:
+      matrix:
+        # 仅保留debian平台配置（因为deb是debian系的包格式）
+        include:
+          - platform: debian
+            arch: amd64
+            package_type: deb  # 明确指定包类型为deb
+
+    steps:
+      # 步骤1：拉取代码仓库
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'  # 递归拉取所有子模块
+
+      # 步骤2：安装deb包编译所需的依赖工具
+      - name: 安装deb编译依赖
+        run: |
+          sudo apt-get update
+          # 安装debian包构建必需工具
+          sudo apt-get install -y build-essential libssl-dev rustc cargo npm \
+            debhelper dh-make fakeroot  # 新增deb包构建专用工具
+
+      # 步骤3：执行编译操作（只生成deb包）
+      - name: 编译SmartDNS的deb包
+        run: |
+          mkdir -p package/output/deb  # 创建专门的deb包输出目录
+          # 执行编译脚本，明确指定debian平台（生成deb包）
+          package/build-pkg.sh \
+            --platform ${{ matrix.platform }} \
+            --arch ${{ matrix.arch }} \
+            --with-ui \
+            --package-type ${{ matrix.package_type }}  # 传递包类型参数（如果脚本支持）
+
+          # 只复制deb格式的产物到输出目录（过滤其他类型包）
+          cp package/*.deb package/output/deb/
+
+      # 步骤4：只保存deb格式的编译产物
+      - name: 保存deb编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartdns-${{ matrix.platform }}-${{ matrix.arch }}-deb
+          path: |
+            package/output/deb/*.deb  # 仅保留deb文件
+            !package/output/deb/*.ipk  # 排除其他类型包（如果有的话）
+            !package/output/deb/*.tar.gz
+
+  # 发布任务：只处理deb包
+  release-deb:
+    needs: build-deb  # 依赖deb构建任务
+    runs-on: ubuntu-latest
+    # 调整触发条件：手动触发或推送master分支时都发布
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    steps:
+      - name: 获取当前日期
+        run: echo "DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: 下载deb编译产物
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: 创建GitHub Release（仅包含deb包）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: deb-build-${{ github.sha }}  # 标签名包含deb标识
+          name: SmartDNS deb包自动构建-${{ env.DATE }}
+          body: 自动编译的SmartDNS deb安装包（debian/amd64）
+          files: ./artifacts/**/*.deb  # 仅上传deb格式文件
+          draft: false
+          prerelease: false
