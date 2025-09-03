@@ -1,0 +1,87 @@
+# 工作流名称：手动触发或推送代码到master分支时执行
+name: 手动或推送代码到master分支时触发
+
+# 触发条件配置
+on:
+  workflow_dispatch:  # 允许通过GitHub Actions页面手动点击"Run workflow"触发
+  push:
+    branches: [master]  # 当代码推送到master分支时自动触发（这里"-"是语法错误，正确应为[master]）
+
+# 定义任务集合
+jobs:
+  # 第一个任务：构建（编译）SmartDNS
+  build:
+    runs-on: ubuntu-22.04  # 运行在Ubuntu 22.04操作系统环境
+    strategy:
+      matrix:
+        # 配置编译矩阵：指定需要编译的平台和架构组合
+        include:
+          # 编译debian系统的amd64架构版本
+          - platform: debian
+            arch: amd64
+
+    # 任务步骤
+    steps:
+      # 步骤1：拉取代码仓库
+      - name: 拉取代码
+        uses: actions/checkout@v4  # 使用官方的代码检出Action，版本v4
+        with:
+          submodules: 'recursive'  # 递归拉取所有子模块
+
+      # 步骤2：安装编译所需的依赖工具
+      - name: 安装编译依赖
+        run: |  # 执行bash命令
+          sudo apt-get update  # 更新软件源
+          # 安装基础编译依赖
+          sudo apt-get install -y build-essential libssl-dev rustc cargo npm
+
+      # 步骤3：执行编译操作
+      - name: 编译SmartDNS
+        run: |  # 执行编译相关的bash命令
+          # 创建输出目录
+          mkdir package/output
+          # 执行编译脚本，传入平台、架构参数，并启用UI功能
+          package/build-pkg.sh \
+            --platform ${{ matrix.platform }} \  # 引用matrix中定义的platform参数（debian）
+            --arch ${{ matrix.arch }} \        # 引用matrix中定义的arch参数（amd64）
+            --with-ui 
+
+          # 将编译生成的所有以smartdns开头的文件复制到output目录
+          cp package/smartdns* package/output/
+          
+
+      # 步骤4：保存编译产物（供后续步骤使用）
+      - name: 保存编译产物（使用最新版v4）
+        uses: actions/upload-artifact@v4  # 使用官方的上传产物Action，版本v4
+        with:
+          # 产物名称，包含平台和架构信息（如smartdns-debian-amd64）
+          name: smartdns-${{ matrix.platform }}-${{ matrix.arch }}
+          # 要保存的文件路径：匹配package目录下所有以smartdns开头的文件
+          path: package/smartdns*  # 匹配所有类型产物（.ipk/.deb/.tar.gz等）
+
+  # 第二个任务：创建发布（依赖build任务完成）
+  release:
+    needs: build  # 依赖build任务，只有build成功后才会执行
+    runs-on: ubuntu-latest  # 运行在最新版Ubuntu环境
+    if: github.event_name == 'schedule'  # 条件判断：只有定时任务触发时才执行（但当前配置中没有schedule触发条件，所以此任务永远不会执行）
+    steps:
+      # 步骤1：获取当前日期并设置为环境变量
+      - name: 获取当前日期
+        run: echo "DATE=$(date +'%Y-%m-%d')" >> $GITHUB_ENV  # 格式如2024-10-01
+
+      # 步骤2：下载之前保存的所有编译产物
+      - name: 下载所有编译产物（使用最新版v4）
+        uses: actions/download-artifact@v4  # 使用官方的下载产物Action，版本v4
+        with:
+          path: ./artifacts  # 下载到当前目录的artifacts文件夹
+
+      # 步骤3：创建GitHub Release并上传产物
+      - name: 创建GitHub Release
+        uses: softprops/action-gh-release@v2  # 使用第三方的创建Release的Action
+        with:
+          tag_name: auto-build-${{ github.sha }}  # 标签名：auto-build-加上当前提交的SHA值
+          name: 自动构建-${{ env.DATE }}  # Release名称：自动构建-日期
+          body: 自动编译的SmartDNS安装包  # Release描述
+          files: ./artifacts/**/*  # 要上传的文件：artifacts目录下所有文件（包括子目录）
+          draft: false  # 不是草稿
+          prerelease: false  # 不是预发布版本
