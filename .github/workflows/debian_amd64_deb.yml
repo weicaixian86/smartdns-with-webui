@@ -1,4 +1,4 @@
-# 工作流名称：编译并按版本规则发布SmartDNS的deb安装包
+# 工作流名称：编译并按每日次数发布SmartDNS的deb安装包
 name: 编译SmartDNS的deb安装包
 
 # 触发条件配置
@@ -9,62 +9,33 @@ on:
 
 # 定义任务集合
 jobs:
-  # 获取上游源码版本号
-  get-version:
-    runs-on: ubuntu-latest
-    outputs:
-      upstream_version: ${{ steps.extract-version.outputs.version }}
-    steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-          
-      - name: 提取上游源码版本号
-        id: extract-version
-        run: |
-          # 这里假设版本号存储在VERSION文件中，根据实际情况修改
-          # 如果版本号在代码中，可使用grep等命令提取
-          if [ -f "VERSION" ]; then
-            VERSION=$(cat VERSION)
-          else
-            # 示例：从脚本中提取版本号，根据实际情况修改正则表达式
-            VERSION=$(grep -oP 'VERSION=\K.*' package/build-pkg.sh)
-          fi
-          # 确保版本号格式正确（去除可能的引号）
-          VERSION=$(echo $VERSION | tr -d '"' | tr -d "'")
-          echo "提取到的上游版本号: $VERSION"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-  # 计算当前版本的编译次数
-  count-builds:
-    needs: get-version
+  # 计算今日编译次数
+  count-daily-builds:
     runs-on: ubuntu-latest
     outputs:
       build_number: ${{ steps.count.outputs.number }}
     steps:
-      - name: 计算同一版本的编译次数
+      - name: 计算今日编译次数
         id: count
         run: |
-          # 获取当前上游版本号
-          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
+          # 获取当前日期（格式：YYYYMMDD）
+          CURRENT_DATE=$(date +'%Y%m%d')
           
-          # 获取所有包含当前版本号的发布标签
-          # 使用GitHub API获取仓库标签
+          # 使用GitHub API获取仓库所有标签
           TAGS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[].name')
           
-          # 筛选包含当前版本号的标签并计数
-          COUNT=$(echo "$TAGS" | grep -c "\.$UPSTREAM_VERSION\.smartdns_with_ui$")
+          # 筛选今天的标签并计数（匹配格式：数字.日期.smartdns_with_ui）
+          COUNT=$(echo "$TAGS" | grep -c "^[0-9]\+\.$CURRENT_DATE\.smartdns_with_ui$")
           
-          # 编译次数从1开始计数
+          # 今日编译次数 = 已有次数 + 1（首次为1）
           BUILD_NUMBER=$((COUNT + 1))
-          echo "当前版本 $UPSTREAM_VERSION 的第 $BUILD_NUMBER 次编译"
+          echo "今日第 $BUILD_NUMBER 次编译"
           echo "number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
 
   # 构建任务：编译deb安装包
   build-deb:
-    needs: [get-version, count-builds]
+    needs: count-daily-builds
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -102,17 +73,16 @@ jobs:
           echo "编译生成的文件："
           ls -la ${{ github.workspace }}/build/
           
-          # 获取版本信息
-          BUILD_NUMBER=${{ needs.count-builds.outputs.build_number }}
+          # 获取命名所需信息
+          BUILD_NUMBER=${{ needs.count-daily-builds.outputs.build_number }}
           CURRENT_DATE=$(date +'%Y%m%d')
-          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
           PLATFORM=${{ matrix.platform }}
           ARCH=${{ matrix.arch }}
           
-          # 重命名deb包为指定格式
+          # 重命名deb包为指定格式：今日第几次编译.当前日期.smartdns_with_ui-平台-架构.deb
           DEB_FILE=$(find ${{ github.workspace }}/build -name "*.deb" | head -n 1)
           if [ -n "$DEB_FILE" ]; then
-            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.${UPSTREAM_VERSION}.smartdns_with_ui-${PLATFORM}-${ARCH}.deb"
+            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui-${PLATFORM}-${ARCH}.deb"
             mv "$DEB_FILE" "${{ github.workspace }}/build/$NEW_NAME"
             echo "已重命名为: $NEW_NAME"
           else
@@ -129,7 +99,7 @@ jobs:
 
   # 发布任务：按指定规则发布
   release-deb:
-    needs: [build-deb, get-version, count-builds]
+    needs: [build-deb, count-daily-builds]
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     steps:
@@ -143,21 +113,20 @@ jobs:
         run: |
           sudo timedatectl set-timezone "Asia/Shanghai"
           
-          # 获取版本信息
-          BUILD_NUMBER=${{ needs.count-builds.outputs.build_number }}
+          # 获取命名所需信息
+          BUILD_NUMBER=${{ needs.count-daily-builds.outputs.build_number }}
           CURRENT_DATE=$(date +'%Y%m%d')
-          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
           
-          # 生成发布标签
-          RELEASE_TAG="${BUILD_NUMBER}.${CURRENT_DATE}.${UPSTREAM_VERSION}.smartdns_with_ui"
+          # 生成发布标签：今日第几次编译.当前日期.smartdns_with_ui
+          RELEASE_TAG="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui"
           echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
           
           # 创建发布说明文件
           touch release.txt
           echo "smartdns_with_ui" >> release.txt
-          echo "版本: $UPSTREAM_VERSION" >> release.txt
-          echo "本次为该版本第 $BUILD_NUMBER 次编译" >> release.txt
-          echo "构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
+          echo "今日第 $BUILD_NUMBER 次编译" >> release.txt
+          echo "构建日期: $(date +'%Y-%m-%d')" >> release.txt
+          echo "构建时间: $(date +'%H:%M:%S')" >> release.txt
           echo "Commit: ${{ github.sha }}" >> release.txt
           echo "status=success" >> $GITHUB_OUTPUT
 
