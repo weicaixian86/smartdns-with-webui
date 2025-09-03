@@ -1,17 +1,71 @@
-# 工作流名称：手动触发或推送代码到master分支时执行（仅编译deb包）
-name: 编译debian_amd64_deb安装包
+# 工作流名称：编译并按版本规则发布SmartDNS的deb安装包
+name: 编译SmartDNS的deb安装包
 
 # 触发条件配置
 on:
-  workflow_dispatch:  # 允许通过GitHub Actions页面手动点击"Run workflow"触发
+  workflow_dispatch:  # 允许手动触发
   push:
-    branches: [master]  # 当代码推送到master分支时自动触发
+    branches: [master]  # 推送master分支时自动触发
 
 # 定义任务集合
 jobs:
-  # 构建任务：只编译deb安装包
+  # 获取上游源码版本号
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_version: ${{ steps.extract-version.outputs.version }}
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          
+      - name: 提取上游源码版本号
+        id: extract-version
+        run: |
+          # 这里假设版本号存储在VERSION文件中，根据实际情况修改
+          # 如果版本号在代码中，可使用grep等命令提取
+          if [ -f "VERSION" ]; then
+            VERSION=$(cat VERSION)
+          else
+            # 示例：从脚本中提取版本号，根据实际情况修改正则表达式
+            VERSION=$(grep -oP 'VERSION=\K.*' package/build-pkg.sh)
+          fi
+          # 确保版本号格式正确（去除可能的引号）
+          VERSION=$(echo $VERSION | tr -d '"' | tr -d "'")
+          echo "提取到的上游版本号: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  # 计算当前版本的编译次数
+  count-builds:
+    needs: get-version
+    runs-on: ubuntu-latest
+    outputs:
+      build_number: ${{ steps.count.outputs.number }}
+    steps:
+      - name: 计算同一版本的编译次数
+        id: count
+        run: |
+          # 获取当前上游版本号
+          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
+          
+          # 获取所有包含当前版本号的发布标签
+          # 使用GitHub API获取仓库标签
+          TAGS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[].name')
+          
+          # 筛选包含当前版本号的标签并计数
+          COUNT=$(echo "$TAGS" | grep -c "\.$UPSTREAM_VERSION\.smartdns_with_ui$")
+          
+          # 编译次数从1开始计数
+          BUILD_NUMBER=$((COUNT + 1))
+          echo "当前版本 $UPSTREAM_VERSION 的第 $BUILD_NUMBER 次编译"
+          echo "number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+  # 构建任务：编译deb安装包
   build-deb:
-    runs-on: ubuntu-22.04  # 运行在Ubuntu 22.04环境（适合构建deb包）
+    needs: [get-version, count-builds]
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         include:
@@ -20,28 +74,24 @@ jobs:
             package_type: deb
 
     steps:
-      # 步骤1：拉取代码仓库
       - name: 拉取代码
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      # 步骤2：设置时区并安装依赖
       - name: 配置环境和依赖
         run: |
-          # 设置为上海时区，与示例保持一致
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev rustc cargo npm \
             debhelper dh-make fakeroot dpkg-dev
 
-      # 步骤3：编译并指定输出目录
       - name: 编译SmartDNS的deb包
         run: |
           chmod +x package/build-pkg.sh
           mkdir -p ${{ github.workspace }}/build
           
-          # 执行编译脚本，使用指定的输出目录
+          # 执行编译脚本
           ./package/build-pkg.sh \
             --platform ${{ matrix.platform }} \
             --arch ${{ matrix.arch }} \
@@ -51,8 +101,25 @@ jobs:
           # 显示编译结果
           echo "编译生成的文件："
           ls -la ${{ github.workspace }}/build/
+          
+          # 获取版本信息
+          BUILD_NUMBER=${{ needs.count-builds.outputs.build_number }}
+          CURRENT_DATE=$(date +'%Y%m%d')
+          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
+          PLATFORM=${{ matrix.platform }}
+          ARCH=${{ matrix.arch }}
+          
+          # 重命名deb包为指定格式
+          DEB_FILE=$(find ${{ github.workspace }}/build -name "*.deb" | head -n 1)
+          if [ -n "$DEB_FILE" ]; then
+            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.${UPSTREAM_VERSION}.smartdns_with_ui-${PLATFORM}-${ARCH}.deb"
+            mv "$DEB_FILE" "${{ github.workspace }}/build/$NEW_NAME"
+            echo "已重命名为: $NEW_NAME"
+          else
+            echo "错误：未找到deb文件"
+            exit 1
+          fi
 
-      # 步骤4：保存编译产物
       - name: 保存deb编译产物
         uses: actions/upload-artifact@v4
         with:
@@ -60,9 +127,9 @@ jobs:
           path: ${{ github.workspace }}/build/*.deb
           if-no-files-found: error
 
-  # 发布任务：按指定规则命名和发布
+  # 发布任务：按指定规则发布
   release-deb:
-    needs: build-deb
+    needs: [build-deb, get-version, count-builds]
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     steps:
@@ -74,20 +141,23 @@ jobs:
       - name: 生成发布标签和说明
         id: tag
         run: |
-          # 设置上海时区
           sudo timedatectl set-timezone "Asia/Shanghai"
           
-          # 提取前8位commit SHA
-          commit_sha=$(echo ${{ github.sha }} | cut -c1-8)
+          # 获取版本信息
+          BUILD_NUMBER=${{ needs.count-builds.outputs.build_number }}
+          CURRENT_DATE=$(date +'%Y%m%d')
+          UPSTREAM_VERSION=${{ needs.get-version.outputs.upstream_version }}
           
-          # 生成发布标签（日期格式）
-          echo "release_tag=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          # 生成发布标签
+          RELEASE_TAG="${BUILD_NUMBER}.${CURRENT_DATE}.${UPSTREAM_VERSION}.smartdns_with_ui"
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
           
           # 创建发布说明文件
           touch release.txt
           echo "smartdns_with_ui" >> release.txt
-          echo "最新构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
-          echo "同步更新上游代码" >> release.txt
+          echo "版本: $UPSTREAM_VERSION" >> release.txt
+          echo "本次为该版本第 $BUILD_NUMBER 次编译" >> release.txt
+          echo "构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
           echo "Commit: ${{ github.sha }}" >> release.txt
           echo "status=success" >> $GITHUB_OUTPUT
 
@@ -99,7 +169,6 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
-          # 上传build目录下所有deb包，保持原文件名
           files: ${{ github.workspace }}/build/**/*.deb
           draft: false
           prerelease: false
