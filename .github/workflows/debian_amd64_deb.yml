@@ -33,7 +33,7 @@ jobs:
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev rustc cargo npm \
-            debhelper dh-make fakeroot dpkg-dev
+            debhelper dh-make fakeroot dpkg-dev jq
 
       # 步骤3：获取当日构建次数
       - name: 获取当日构建次数
@@ -45,15 +45,24 @@ jobs:
           # 获取当前日期
           current_date=$(date +'%Y%m%d')
           
-          # 获取同一日期的构建次数
-          # 使用GitHub API获取今日的工作流运行次数
-          count=$(gh api /repos/${{ github.repository }}/actions/runs \
-            --param status=success \
-            --param created=$(date +'%Y-%m-%d') \
-            | jq '.total_count')
+          # 初始化构建次数为1
+          build_number=1
           
-          # 计算当前是第几次构建（加1，因为当前构建还未完成）
-          build_number=$((count + 1))
+          # 尝试获取同一日期的构建次数（使用更可靠的方法）
+          if [[ -n "${{ secrets.TOKEN }}" ]]; then
+            # 使用GitHub API获取今日的工作流运行次数
+            runs=$(gh api --silent /repos/${{ github.repository }}/actions/runs \
+              --param status=completed \
+              --param created=$(date +'%Y-%m-%d'))
+            
+            # 解析JSON获取成功运行的次数
+            count=$(echo "$runs" | jq -r '.total_count')
+            
+            # 如果获取成功且count是数字，则计算构建次数
+            if [[ "$count" =~ ^[0-9]+$ ]]; then
+              build_number=$((count + 1))
+            fi
+          fi
           
           echo "current_date=$current_date" >> $GITHUB_OUTPUT
           echo "build_number=$build_number" >> $GITHUB_OUTPUT
@@ -112,15 +121,23 @@ jobs:
           # 获取当前日期
           current_date=$(date +'%Y%m%d')
           
-          # 获取同一日期的构建次数
-          count=$(gh api /repos/${{ github.repository }}/actions/runs \
-            --param status=success \
-            --param created=$(date +'%Y-%m-%d') \
-            | jq '.total_count')
-          build_number=$count
+          # 初始化构建次数为1
+          build_number=1
           
-          # 生成发布标签：今日第几次编译.当前日期.smartdns_with_ui
-          echo "release_tag=${build_number}.${current_date}.smartdns_with_ui" >> $GITHUB_OUTPUT
+          # 尝试获取同一日期的构建次数
+          if [[ -n "${{ secrets.TOKEN }}" ]]; then
+            runs=$(gh api --silent /repos/${{ github.repository }}/actions/runs \
+              --param status=completed \
+              --param created=$(date +'%Y-%m-%d'))
+            count=$(echo "$runs" | jq -r '.total_count')
+            if [[ "$count" =~ ^[0-9]+$ ]]; then
+              build_number=$count
+            fi
+          fi
+          
+          # 生成有效的发布标签（确保不以点号开头）
+          # 格式：v[次数].[日期].smartdns_with_ui
+          echo "release_tag=v${build_number}.${current_date}.smartdns_with_ui" >> $GITHUB_OUTPUT
           
           # 创建发布说明文件
           touch release.txt
@@ -141,7 +158,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
-          # 上传build目录下所有deb包，保持原文件名
           files: ${{ github.workspace }}/build/**/*.deb
           draft: false
           prerelease: false
+    
