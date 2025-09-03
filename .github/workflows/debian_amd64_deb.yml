@@ -1,5 +1,5 @@
 # 工作流名称：手动触发或推送代码到master分支时执行（仅编译deb包）
-name: 编译SmartDNS的deb安装包
+name: 手动或当代码推送时编译debian_amd64_deb
 
 # 触发条件配置
 on:
