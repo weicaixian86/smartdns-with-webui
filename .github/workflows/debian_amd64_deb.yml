@@ -1,95 +1,90 @@
-# 工作流名称：编译并按每日次数发布SmartDNS的deb安装包
-name: 编译SmartDNS的deb安装包
+# 工作流名称：手动触发或推送代码到master分支时执行（仅编译deb包）
+name: 编译debian_amd64_deb安装包
 
 # 触发条件配置
 on:
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:  # 允许通过GitHub Actions页面手动点击"Run workflow"触发
   push:
-    branches: [master]  # 推送master分支时自动触发
+    branches: [master]  # 当代码推送到master分支时自动触发
 
 # 定义任务集合
 jobs:
-  # 计算今日编译次数
-  count-daily-builds:
-    runs-on: ubuntu-latest
-    outputs:
-      build_number: ${{ steps.count.outputs.number }}
-    steps:
-      - name: 计算今日编译次数
-        id: count
-        run: |
-          # 获取当前日期（格式：YYYYMMDD）
-          CURRENT_DATE=$(date +'%Y%m%d')
-          
-          # 使用GitHub API获取仓库所有标签
-          TAGS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[].name')
-          
-          # 筛选今天的标签并计数（匹配格式：数字.日期.smartdns_with_ui）
-          COUNT=$(echo "$TAGS" | grep -c "^[0-9]\+\.$CURRENT_DATE\.smartdns_with_ui$")
-          
-          # 今日编译次数 = 已有次数 + 1（首次为1）
-          BUILD_NUMBER=$((COUNT + 1))
-          echo "今日第 $BUILD_NUMBER 次编译"
-          echo "number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
-
-  # 构建任务：编译deb安装包
+  # 构建任务：只编译deb安装包
   build-deb:
-    needs: count-daily-builds
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04  # 运行在Ubuntu 22.04环境（适合构建deb包）
     strategy:
       matrix:
         include:
-          - platform: debian  # 系统名称
-            arch: amd64       # 架构名称
+          - platform: debian
+            arch: amd64
             package_type: deb
 
     steps:
+      # 步骤1：拉取代码仓库
       - name: 拉取代码
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
+      # 步骤2：设置时区并安装依赖
       - name: 配置环境和依赖
         run: |
+          # 设置为上海时区
           sudo timedatectl set-timezone "Asia/Shanghai"
           sudo apt-get update
           sudo apt-get install -y build-essential libssl-dev rustc cargo npm \
             debhelper dh-make fakeroot dpkg-dev
 
+      # 步骤3：获取当日构建次数
+      - name: 获取当日构建次数
+        id: build-count
+        run: |
+          # 设置上海时区
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          
+          # 获取当前日期
+          current_date=$(date +'%Y%m%d')
+          
+          # 获取同一日期的构建次数
+          # 使用GitHub API获取今日的工作流运行次数
+          count=$(gh api /repos/${{ github.repository }}/actions/runs \
+            --param status=success \
+            --param created=$(date +'%Y-%m-%d') \
+            | jq '.total_count')
+          
+          # 计算当前是第几次构建（加1，因为当前构建还未完成）
+          build_number=$((count + 1))
+          
+          echo "current_date=$current_date" >> $GITHUB_OUTPUT
+          echo "build_number=$build_number" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+
+      # 步骤4：编译并指定输出目录和文件名
       - name: 编译SmartDNS的deb包
         run: |
           chmod +x package/build-pkg.sh
           mkdir -p ${{ github.workspace }}/build
           
-          # 执行编译脚本
+          # 执行编译脚本，使用指定的输出目录
           ./package/build-pkg.sh \
             --platform ${{ matrix.platform }} \
             --arch ${{ matrix.arch }} \
             --with-ui \
             --outputdir ${{ github.workspace }}/build
           
+          # 获取编译生成的原始文件名
+          original_file=$(ls ${{ github.workspace }}/build/*.deb)
+          
+          # 重命名文件为指定格式：今日第几次编译.当前日期.smartdns_with_ui-系统-架构.deb
+          new_filename="${{ steps.build-count.outputs.build_number }}.${{ steps.build-count.outputs.current_date }}.smartdns_with_ui-${{ matrix.platform }}-${{ matrix.arch }}.deb"
+          mv "$original_file" "${{ github.workspace }}/build/$new_filename"
+          
           # 显示编译结果
           echo "编译生成的文件："
           ls -la ${{ github.workspace }}/build/
-          
-          # 获取命名所需信息
-          BUILD_NUMBER=${{ needs.count-daily-builds.outputs.build_number }}
-          CURRENT_DATE=$(date +'%Y%m%d')
-          SYSTEM=${{ matrix.platform }}  # 系统名称（如debian）
-          ARCH=${{ matrix.arch }}        # 架构名称（如amd64）
-          
-          # 重命名deb包为指定格式：今日第几次编译.当前日期.smartdns_with_ui-系统-架构.deb
-          DEB_FILE=$(find ${{ github.workspace }}/build -name "*.deb" | head -n 1)
-          if [ -n "$DEB_FILE" ]; then
-            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui-${SYSTEM}-${ARCH}.deb"
-            mv "$DEB_FILE" "${{ github.workspace }}/build/$NEW_NAME"
-            echo "已重命名为: $NEW_NAME"
-          else
-            echo "错误：未找到deb文件"
-            exit 1
-          fi
 
+      # 步骤5：保存编译产物
       - name: 保存deb编译产物
         uses: actions/upload-artifact@v4
         with:
@@ -97,9 +92,9 @@ jobs:
           path: ${{ github.workspace }}/build/*.deb
           if-no-files-found: error
 
-  # 发布任务：按指定规则发布
+  # 发布任务：按指定规则命名和发布
   release-deb:
-    needs: [build-deb, count-daily-builds]
+    needs: build-deb
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     steps:
@@ -111,26 +106,32 @@ jobs:
       - name: 生成发布标签和说明
         id: tag
         run: |
+          # 设置上海时区
           sudo timedatectl set-timezone "Asia/Shanghai"
           
-          # 获取命名所需信息
-          BUILD_NUMBER=${{ needs.count-daily-builds.outputs.build_number }}
-          CURRENT_DATE=$(date +'%Y%m%d')
+          # 获取当前日期
+          current_date=$(date +'%Y%m%d')
+          
+          # 获取同一日期的构建次数
+          count=$(gh api /repos/${{ github.repository }}/actions/runs \
+            --param status=success \
+            --param created=$(date +'%Y-%m-%d') \
+            | jq '.total_count')
+          build_number=$count
           
           # 生成发布标签：今日第几次编译.当前日期.smartdns_with_ui
-          RELEASE_TAG="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui"
-          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "release_tag=${build_number}.${current_date}.smartdns_with_ui" >> $GITHUB_OUTPUT
           
           # 创建发布说明文件
           touch release.txt
           echo "smartdns_with_ui" >> release.txt
-          echo "今日第 $BUILD_NUMBER 次编译" >> release.txt
-          echo "构建日期: $(date +'%Y-%m-%d')" >> release.txt
-          echo "构建时间: $(date +'%H:%M:%S')" >> release.txt
-          echo "系统: debian" >> release.txt
-          echo "架构: amd64" >> release.txt
+          echo "最新构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
+          echo "今日构建次数: $build_number" >> release.txt
+          echo "同步更新上游代码" >> release.txt
           echo "Commit: ${{ github.sha }}" >> release.txt
           echo "status=success" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
 
       - name: 发布deb安装包
         uses: softprops/action-gh-release@v1
@@ -140,6 +141,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
           body_path: release.txt
+          # 上传build目录下所有deb包，保持原文件名
           files: ${{ github.workspace }}/build/**/*.deb
           draft: false
           prerelease: false
