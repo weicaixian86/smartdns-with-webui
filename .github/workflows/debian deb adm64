@@ -1,0 +1,86 @@
+name: debian deb build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      
+jobs:
+  # get-version:
+  #   name: get latest version number
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     CUR_VERSION: ${{steps.get-version.outputs.CUR_VERSION}}
+  #   steps:
+  #   - uses: actions/checkout@v3
+  #     with:
+  #       ref: VERSION_CONTROL
+  #       fetch-depth: 1
+  #       path: version_control
+  #   - name: get version
+  #     id: get-version
+  #     run: |
+  #         #获取当前版本号
+  #         pre_version=$(cat version_control/VERSION | grep "PREFEX" | sed 's/PREFEX=\(.*\)/\1/')
+  #         cur_version=$(cat version_control/VERSION | grep "CUR_VERS" | sed 's/CUR_VERS=\(.*\)/\1/')
+  #         echo "CUR_VERSION=$pre_version$cur_version" >> $GITHUB_OUTPUT
+
+  build: 
+    # needs: get-version
+    strategy:
+      matrix:
+        include:
+          #- platform: debian
+            #arch: arm64
+          #- platform: debian
+            #arch: armhf
+          - platform: debian
+            arch: amd64
+
+        # goarch: [x86_64, aarch64, armv7]
+        # bindgen 似乎不支持armv7和powerpc64le
+      fail-fast: false
+    runs-on: ubuntu-22.04
+    env:
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: build-smartdns
+        run: |
+          sudo timedatectl set-timezone "Asia/Shanghai"
+          cd ${{ github.workspace }}
+          mkdir -p ${{ github.workspace }}/build
+          #修改版本号
+          # sed -i "s/VER=.*/VER=${{needs.get-version.outputs.CUR_VERSION}}/" ${{ github.workspace }}/package/build-pkg.sh
+          ./package/build-pkg.sh \
+            --platform ${{ matrix.platform }} \
+            --arch ${{ matrix.arch }} \
+            --with-ui \
+            --outputdir ${{ github.workspace }}/build
+          # cp package/smartdns* ${{ github.workspace }}/build/
+          # ./package/build-pkg.sh --platform linux --arch all --filearch $GOARCH-linux --outputdir ${{ github.workspace }}/build/
+
+     
+      - name: general tag and release 
+        id: tag
+        run: |
+          cd ${{ github.workspace }}
+          # echo "release_tag=${{needs.get-version.outputs.CUR_VERSION}}_with_ui" >> $GITHUB_OUTPUT
+          commit_sha=$(echo ${{ github.sha }} | cut -c1-8)
+          echo "release_tag=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          touch release.txt
+          echo "smartdns_with_ui" >> release.txt
+          echo "最新构建时间: $(date +'%Y-%m-%d %H:%M:%S')" >> release.txt
+          echo "同步更新上游代码" >> release.txt
+          echo ${{ github.sha }} >> release.txt
+          echo "status=success" >> $GITHUB_OUTPUT
+      - name: Upload firmware to release
+        uses: softprops/action-gh-release@v1
+        if: steps.tag.outputs.status == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          body_path: release.txt
+          files: |
+            ${{ github.workspace }}/build/*
