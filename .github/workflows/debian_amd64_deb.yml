@@ -40,8 +40,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - platform: debian
-            arch: amd64
+          - platform: debian  # 系统名称
+            arch: amd64       # 架构名称
             package_type: deb
 
     steps:
@@ -76,13 +76,13 @@ jobs:
           # 获取命名所需信息
           BUILD_NUMBER=${{ needs.count-daily-builds.outputs.build_number }}
           CURRENT_DATE=$(date +'%Y%m%d')
-          PLATFORM=${{ matrix.platform }}
-          ARCH=${{ matrix.arch }}
+          SYSTEM=${{ matrix.platform }}  # 系统名称（如debian）
+          ARCH=${{ matrix.arch }}        # 架构名称（如amd64）
           
-          # 重命名deb包为指定格式：今日第几次编译.当前日期.smartdns_with_ui-平台-架构.deb
+          # 重命名deb包为指定格式：今日第几次编译.当前日期.smartdns_with_ui-系统-架构.deb
           DEB_FILE=$(find ${{ github.workspace }}/build -name "*.deb" | head -n 1)
           if [ -n "$DEB_FILE" ]; then
-            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui-${PLATFORM}-${ARCH}.deb"
+            NEW_NAME="${BUILD_NUMBER}.${CURRENT_DATE}.smartdns_with_ui-${SYSTEM}-${ARCH}.deb"
             mv "$DEB_FILE" "${{ github.workspace }}/build/$NEW_NAME"
             echo "已重命名为: $NEW_NAME"
           else
@@ -127,6 +127,8 @@ jobs:
           echo "今日第 $BUILD_NUMBER 次编译" >> release.txt
           echo "构建日期: $(date +'%Y-%m-%d')" >> release.txt
           echo "构建时间: $(date +'%H:%M:%S')" >> release.txt
+          echo "系统: debian" >> release.txt
+          echo "架构: amd64" >> release.txt
           echo "Commit: ${{ github.sha }}" >> release.txt
           echo "status=success" >> $GITHUB_OUTPUT
 
