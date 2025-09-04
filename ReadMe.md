@@ -5,14 +5,14 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 ![SmartDNS-WebUI](doc/smartdns-webui.png)
 
 使用说明  
-1、把deb安装文件上传至tmp目录，分配755权限，执行SSH命令。  
+1、把deb安装文件上传至tmp目录，分配755权限。  
 
 2、安装deb安装包，SSH命令（smartdns.1.2025.09.02-1245.amd64.deb文件名自行修改）。  
 cd /tmp  
 apt install ./smartdns.1.2025.09.02-1245.amd64.deb  
 
 3、修改配置文件/root/smartdns/smartdns.conf内容如下  
-#DNS服务器名称  
+```#DNS服务器名称  
 server-name smartdns  
 #DNS端囗号  
 bind [::]:53  
@@ -56,15 +56,15 @@ martdns-ui.max-query-log-age 86400
 smartdns-ui.enable-terminal yes  
 smartdns-ui.enable-cors yes  
 smartdns-ui.user admin  
-smartdns-ui.password password  
+smartdns-ui.password password  ```
 
 #如需要DOH解析自行替换数字形式的DNS----------------------------------------------------------  
-#Bootstrap Servers (传统UDP服务器，仅用于解析DoH域名)  
+```#Bootstrap Servers (传统UDP服务器，仅用于解析DoH域名)  
 server 223.5.5.5 -bootstrap-dns  
 server 119.29.29.29 -bootstrap-dns  
 #DoH Servers (加密服务器，用于所有真实查询)  
 server-https https://dns.alidns.com/dns-query -group cn  
-server-https https://doh.pub/dns-query -group cn  
+server-https https://doh.pub/dns-query -group cn  ```
 
 4、开机启动并立即启动服务  
 systemctl enable smartdns.service --now  
