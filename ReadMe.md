@@ -8,9 +8,10 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 1、把deb安装文件上传至tmp目录，分配755权限。  
 
 2、安装deb安装包，SSH命令（smartdns.1.2025.09.02-1245.amd64.deb文件名自行修改）。  
+```
 cd /tmp  
 apt install ./smartdns.1.2025.09.02-1245.amd64.deb  
-
+```
 3、修改配置文件/root/smartdns/smartdns.conf内容如下  
 ```
 #DNS服务器名称  
@@ -69,8 +70,9 @@ server-https https://dns.alidns.com/dns-query -group cn
 server-https https://doh.pub/dns-query -group cn  
 ```
 4、开机启动并立即启动服务  
+```
 systemctl enable smartdns.service --now  
-
+```
 5、WEB UI访问  
 http://IP:6080  
 默认用户名：admin  
@@ -78,13 +80,21 @@ http://IP:6080
 
 6、卸载  
 卸载软件（保留配置文件）  
-apt remove smartdns  
+```
+apt remove smartdns
+```
 彻底卸载（推荐，删除软件及其配置文件）  
-apt purge smartdns -y  
+```
+apt purge smartdns -y
+```
 #或者  
-apt remove --purge smartdns  
+```
+apt remove --purge smartdns
+```
 卸载完后，可以运行以下命令删除不再需要的依赖包：  
-apt autoremove  
+```
+apt autoremove
+```
 
 7、捐赠原作者pymumu  
 如果你觉得此项目对你有帮助，请捐助我们，使项目能持续发展和更加完善。  
