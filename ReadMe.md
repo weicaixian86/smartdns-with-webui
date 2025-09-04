@@ -12,7 +12,8 @@ cd /tmp
 apt install ./smartdns.1.2025.09.02-1245.amd64.deb  
 
 3、修改配置文件/root/smartdns/smartdns.conf内容如下  
-```#DNS服务器名称  
+```
+#DNS服务器名称  
 server-name smartdns  
 #DNS端囗号  
 bind [::]:53  
@@ -58,14 +59,15 @@ smartdns-ui.enable-cors yes
 smartdns-ui.user admin  
 smartdns-ui.password password  
 ```
-#如需要DOH解析自行替换数字形式的DNS----------------------------------------------------------  
-```#Bootstrap Servers (传统UDP服务器，仅用于解析DoH域名)  
+如需要DOH解析自行替换数字形式的DNS
+```
+#Bootstrap Servers (传统UDP服务器，仅用于解析DoH域名)  
 server 223.5.5.5 -bootstrap-dns  
 server 119.29.29.29 -bootstrap-dns  
 #DoH Servers (加密服务器，用于所有真实查询)  
 server-https https://dns.alidns.com/dns-query -group cn  
 server-https https://doh.pub/dns-query -group cn  
-
+```
 4、开机启动并立即启动服务  
 systemctl enable smartdns.service --now  
 
