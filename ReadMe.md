@@ -57,7 +57,7 @@ smartdns-ui.enable-terminal yes
 smartdns-ui.enable-cors yes  
 smartdns-ui.user admin  
 smartdns-ui.password password  
-
+```
 #如需要DOH解析自行替换数字形式的DNS----------------------------------------------------------  
 ```#Bootstrap Servers (传统UDP服务器，仅用于解析DoH域名)  
 server 223.5.5.5 -bootstrap-dns  
