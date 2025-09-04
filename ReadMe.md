@@ -6,9 +6,11 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 
 使用说明  
 1、把deb安装文件上传至tmp目录，分配755权限，执行SSH命令。  
+
 2、安装deb安装包，SSH命令（smartdns.1.2025.09.02-1245.amd64.deb文件名自行修改）。  
 cd /tmp  
 apt install ./smartdns.1.2025.09.02-1245.amd64.deb  
+
 3、修改配置文件/root/smartdns/smartdns.conf内容如下  
 #DNS服务器名称  
 server-name smartdns  
