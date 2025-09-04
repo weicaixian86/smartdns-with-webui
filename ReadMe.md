@@ -104,5 +104,5 @@ AliPay支付宝
 ![alipay](doc/alipay_donate.jpg)  
 WeChat Pay微信支付  
 ![wechat](doc/wechat_donate.jpg)  
-#开源声明  
+8、开源声明  
 SmartDNS 基于 GPL V3 协议开源。
