@@ -71,7 +71,7 @@ server-https https://doh.pub/dns-query -group cn
 ```
 5、开机启动并立即启动服务  
 ```
-systemctl enable smartdns.service --now  
+systemctl enable smartdns.service --now
 ```
 6、WEB UI访问  
 http://IP:6080  
