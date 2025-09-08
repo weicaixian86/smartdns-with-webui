@@ -9,8 +9,8 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 2、把deb安装文件上传至tmp目录，分配755权限。  
 3、安装deb安装包（smartdns.1.2025.09.02-1245.amd64.deb文件名自行修改）。  
 ```
-cd /tmp  
-apt install ./smartdns.1.2025.09.02-1245.amd64.deb  
+cd /tmp
+apt install ./smartdns.1.2025.09.02-1245.amd64.deb
 ```
 4、修改配置文件/root/smartdns/smartdns.conf内容如下  
 ```
