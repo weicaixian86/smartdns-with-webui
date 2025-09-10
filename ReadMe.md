@@ -49,7 +49,7 @@ response-mode first-ping
 speed-check-mode ping,tcp:80,tcp:443
 
 # 扩展功能，禁用ipv6、禁用SOA 65、启用mDNS查询。
-force-AAAA-SOA yes
+force-AAAA-SOA no
 force-qtype-SOA 65
 mdns-lookup yes
 
