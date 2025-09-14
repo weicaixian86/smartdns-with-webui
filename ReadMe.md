@@ -18,7 +18,7 @@ apt install ./smartdns.1.2025.09.02-1245.amd64.deb
 server-name smartdns
 
 # DNS端囗号
-bind [::]:53
+bind [::]:53 -force-aaaa-soa
 
 # 设置日志
 log-level error
@@ -49,7 +49,7 @@ response-mode first-ping
 speed-check-mode ping,tcp:80,tcp:443
 
 # 扩展功能，禁用ipv6、禁用SOA 65、启用mDNS查询。
-force-AAAA-SOA no
+force-AAAA-SOA yes
 force-qtype-SOA 65
 mdns-lookup yes
 
