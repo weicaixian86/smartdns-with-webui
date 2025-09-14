@@ -87,7 +87,16 @@ http://IP:6080
 默认用户名：admin  
 默认密码：password  
 
-7、卸载  
+7、升级，不会覆盖配置文件，最好备份。
+```
+cd /tmp
+apt install ./smartdns.1.2025.09.02-1245.amd64.deb
+```
+开机启动并立即启动服务
+```
+systemctl enable smartdns.service --now
+```
+8、卸载  
 卸载软件（保留配置文件）  
 ```
 apt remove smartdns
@@ -105,7 +114,7 @@ apt remove --purge smartdns
 apt autoremove
 ```
 
-8、捐赠原作者pymumu  
+9、捐赠原作者pymumu  
 如果你觉得此项目对你有帮助，请捐助我们，使项目能持续发展和更加完善。  
 PayPal贝宝  
 [![Support via PayPal](https://cdn.rawgit.com/twolfson/paypal-github-button/1.0.0/dist/button.svg)](https://paypal.me/PengNick/)  
@@ -113,5 +122,5 @@ AliPay支付宝
 ![alipay](doc/alipay_donate.jpg)  
 WeChat Pay微信支付  
 ![wechat](doc/wechat_donate.jpg)  
-9、开源声明  
+10、开源声明  
 SmartDNS 基于 GPL V3 协议开源。
