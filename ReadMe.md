@@ -17,7 +17,7 @@ apt install ./smartdns.1.2025.09.02-1245.amd64.deb
 # DNS服务器名称
 server-name smartdns
 
-# DNS端囗号
+# DNS端囗号，禁用ipv6。
 bind [::]:53 -force-aaaa-soa
 
 # 设置日志
