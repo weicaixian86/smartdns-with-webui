@@ -17,6 +17,7 @@
  */
 
 #include "context.h"
+#include "smartdns/dns_conf.h"
 #include "address.h"
 #include "audit.h"
 #include "cache.h"
@@ -177,18 +178,12 @@ static int _dns_rrs_add_all_best_ip(struct dns_server_post_context *context)
 static int _dns_server_add_srv(struct dns_server_post_context *context)
 {
 	struct dns_request *request = context->request;
-	struct dns_srv_records *srv_records = request->srv_records;
-	struct dns_srv_record *srv_record = NULL;
+	struct dns_request_srv *srv = NULL;
 	int ret = 0;
 
-	if (srv_records == NULL) {
-		return 0;
-	}
-
-	list_for_each_entry(srv_record, &srv_records->list, list)
-	{
-		ret = dns_add_SRV(context->packet, DNS_RRS_AN, request->domain, request->ip_ttl, srv_record->priority,
-						  srv_record->weight, srv_record->port, srv_record->host);
+	list_for_each_entry(srv, &request->srv_list, list) {
+		ret = dns_add_SRV(context->packet, DNS_RRS_AN, request->domain, request->ip_ttl, srv->priority, srv->weight,
+						  srv->port, srv->host);
 		if (ret != 0) {
 			return -1;
 		}
@@ -262,52 +257,66 @@ static int _dns_add_rrs_ip_hint(struct dns_server_post_context *context, struct 
 static int _dns_add_rrs_HTTPS(struct dns_server_post_context *context)
 {
 	struct dns_request *request = context->request;
-	struct dns_request_https *https_svcb = request->https_svcb;
+	struct dns_request_https *https_svcb;
 	int ret = 0;
 	struct dns_rr_nested param;
 
-	if (https_svcb == NULL || request->qtype != DNS_T_HTTPS) {
+	if (request->qtype != DNS_T_HTTPS) {
 		return 0;
 	}
 
-	ret = dns_add_HTTPS_start(&param, context->packet, DNS_RRS_AN, https_svcb->domain, https_svcb->ttl,
-							  https_svcb->priority, https_svcb->target);
-	if (ret != 0) {
-		return ret;
-	}
-
-	if (https_svcb->alpn[0] != '\0' && https_svcb->alpn_len > 0) {
-		ret = dns_HTTPS_add_alpn(&param, https_svcb->alpn, https_svcb->alpn_len);
+	list_for_each_entry(https_svcb, &request->https_svcb_list, list) {
+		ret = dns_add_HTTPS_start(&param, context->packet, DNS_RRS_AN, https_svcb->domain, https_svcb->ttl,
+								  https_svcb->priority, https_svcb->target);
 		if (ret != 0) {
 			return ret;
 		}
-	}
 
-	if (https_svcb->port != 0) {
-		ret = dns_HTTPS_add_port(&param, https_svcb->port);
+		if (https_svcb->alpn[0] != '\0' && https_svcb->alpn_len > 0) {
+			ret = dns_HTTPS_add_alpn(&param, https_svcb->alpn, https_svcb->alpn_len);
+			if (ret != 0) {
+				return ret;
+			}
+		}
+
+		if (https_svcb->port != 0) {
+			ret = dns_HTTPS_add_port(&param, https_svcb->port);
+			if (ret != 0) {
+				return ret;
+			}
+		}
+
+		if (https_svcb->has_ipv4) {
+			unsigned char *addr[1];
+			addr[0] = https_svcb->ipv4_addr;
+			ret = dns_HTTPS_add_ipv4hint(&param, addr, 1);
+		} else {
+			ret = _dns_add_rrs_ip_hint(context, &param, DNS_T_A);
+		}
 		if (ret != 0) {
 			return ret;
 		}
-	}
 
-	ret = _dns_add_rrs_ip_hint(context, &param, DNS_T_A);
-	if (ret != 0) {
-		return ret;
-	}
+		if (https_svcb->ech_len > 0) {
+			ret = dns_HTTPS_add_ech(&param, https_svcb->ech, https_svcb->ech_len);
+			if (ret != 0) {
+				return ret;
+			}
+		}
 
-	if (https_svcb->ech_len > 0) {
-		ret = dns_HTTPS_add_ech(&param, https_svcb->ech, https_svcb->ech_len);
+		if (https_svcb->has_ipv6) {
+			unsigned char *addr[1];
+			addr[0] = https_svcb->ipv6_addr;
+			ret = dns_HTTPS_add_ipv6hint(&param, addr, 1);
+		} else {
+			ret = _dns_add_rrs_ip_hint(context, &param, DNS_T_AAAA);
+		}
 		if (ret != 0) {
 			return ret;
 		}
-	}
 
-	ret = _dns_add_rrs_ip_hint(context, &param, DNS_T_AAAA);
-	if (ret != 0) {
-		return ret;
+		dns_add_HTTPS_end(&param);
 	}
-
-	dns_add_HTTPS_end(&param);
 	return 0;
 }
 
@@ -328,7 +337,7 @@ static int _dns_add_rrs(struct dns_server_post_context *context)
 		domain = request->cname;
 	}
 
-	if (request->https_svcb != NULL) {
+	if (!list_empty(&request->https_svcb_list)) {
 		ret = _dns_add_rrs_HTTPS(context);
 	}
 
@@ -377,7 +386,7 @@ static int _dns_add_rrs(struct dns_server_post_context *context)
 		ret |= dns_add_OPT_ECS(context->packet, &request->ecs);
 	}
 
-	if (request->srv_records != NULL) {
+	if (!list_empty(&request->srv_list)) {
 		ret |= _dns_server_add_srv(context);
 	}
 
@@ -636,17 +645,17 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 			} break;
 			case DNS_T_HTTPS: {
 				char target[DNS_MAX_CNAME_LEN] = {0};
-				struct dns_https_param *p = NULL;
+				struct dns_svcparam *p = NULL;
 				int priority = 0;
 
-				int ret = dns_get_HTTPS_svcparm_start(rrs, &p, name, DNS_MAX_CNAME_LEN, &ttl, &priority, target,
+				int ret = dns_svcparm_start(rrs, &p, name, DNS_MAX_CNAME_LEN, &ttl, &priority, target,
 													  DNS_MAX_CNAME_LEN);
 				if (ret != 0) {
 					tlog(TLOG_WARN, "get HTTPS svcparm failed");
 					return -1;
 				}
 
-				for (; p; p = dns_get_HTTPS_svcparm_next(rrs, p)) {
+				for (; p; p = dns_svcparm_next(rrs, p)) {
 					switch (p->key) {
 					case DNS_HTTPS_T_IPV4HINT: {
 						unsigned char *addr;
@@ -728,7 +737,7 @@ static int _dns_result_child_post(struct dns_server_post_context *context)
 	return 0;
 }
 
-static int _dns_request_update_id_ttl(struct dns_server_post_context *context)
+static int _dns_request_update_id_ttl_domain(struct dns_server_post_context *context)
 {
 	int ttl = context->reply_ttl;
 	struct dns_request *request = context->request;
@@ -758,6 +767,7 @@ static int _dns_request_update_id_ttl(struct dns_server_post_context *context)
 	param.id = request->id;
 	param.cname_ttl = ttl;
 	param.ip_ttl = ttl;
+	param.query_domain = request->original_domain;
 	if (dns_packet_update(context->inpacket, context->inpacket_len, &param) != 0) {
 		tlog(TLOG_DEBUG, "update packet info failed.");
 	}
@@ -820,7 +830,7 @@ int _dns_request_post(struct dns_server_post_context *context)
 		return 0;
 	}
 
-	ret = _dns_request_update_id_ttl(context);
+	ret = _dns_request_update_id_ttl_domain(context);
 	if (ret != 0) {
 		tlog(TLOG_ERROR, "update packet ttl failed.");
 		return -1;
@@ -994,6 +1004,10 @@ int _dns_cache_reply_packet(struct dns_server_post_context *context)
 			return 0;
 		}
 
+		if (context->packet->head.rcode == DNS_RC_NXDOMAIN) {
+			context->reply_ttl = 0;
+		}
+
 		return _dns_cache_packet(context);
 	}
 
@@ -1047,11 +1061,12 @@ int _dns_server_reply_passthrough(struct dns_server_post_context *context)
 		char clientip[DNS_MAX_CNAME_LEN] = {0};
 
 		/* When passthrough, modify the id to be the id of the client request. */
-		int ret = _dns_request_update_id_ttl(context);
+		int ret = _dns_request_update_id_ttl_domain(context);
 		if (ret != 0) {
 			tlog(TLOG_ERROR, "update packet ttl failed.");
 			return -1;
 		}
+
 		_dns_reply_inpacket(request, context->inpacket, context->inpacket_len);
 
 		tlog(TLOG_INFO, "result: %s, client: %s, qtype: %d, id: %d, group: %s, time: %lums", request->domain,

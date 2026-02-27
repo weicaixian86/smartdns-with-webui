@@ -551,6 +551,8 @@ static int _tlog_write_output_func(struct tlog_log *log, char *buff, int bufflen
 static void _tlog_output_warning(void)
 {
     static int printed = 0;
+    int unused __attribute__((unused));
+
     if (printed) {
         return;
     }
@@ -565,7 +567,7 @@ static void _tlog_output_warning(void)
     if (root->logcount > 0 && root->logsize > 0 && root->logfile[0] != 0) {
         int fd = open(root->logfile, O_APPEND | O_CREAT | O_WRONLY | O_CLOEXEC, root->file_perm);
         if (fd >= 0) {
-            write(fd, warning_msg, sizeof(warning_msg) - 1);
+            unused = write(fd, warning_msg, sizeof(warning_msg) - 1);
             close(fd);
         }
     }
@@ -1201,6 +1203,7 @@ static int _tlog_archive_log_compressed(struct tlog_log *log)
 
     /* start gzip process to compress log file */
     if (log->zip_pid <= 0) {
+        // NOLINTNEXTLINE(bugprone-unsafe-functions): vfork is safe here as we immediately exec
         int pid = vfork();
         if (pid == 0) {
             _tlog_close_all_fd();
@@ -1965,13 +1968,12 @@ tlog_log *tlog_open(const char *logfile, int maxlogsize, int maxlogcount, int bu
         return NULL;
     }
 
-    log = (struct tlog_log *)malloc(sizeof(*log));
+    log = (struct tlog_log *)calloc(1, sizeof(*log));
     if (log == NULL) {
         fprintf(stderr, "tlog: malloc log failed.\n");
         return NULL;
     }
 
-    memset(log, 0, sizeof(*log));
     log->start = 0;
     log->end = 0;
     log->ext_end = 0;

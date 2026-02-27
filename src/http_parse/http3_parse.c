@@ -178,7 +178,7 @@ static int _http3_build_headers_payload(struct http_head *http_head, uint8_t *bu
 		offset += offset_ret;
 	} else if (http_head->head_type == HTTP_HEAD_RESPONSE) {
 		char status_str[12];
-		sprintf(status_str, "%d", http_head->code);
+		snprintf(status_str, sizeof(status_str), "%d", http_head->code);
 		offset_ret = _qpack_build_header(":status", status_str, buffer + offset, buffer_len - offset);
 		if (offset_ret < 0) {
 			return -1;
@@ -197,7 +197,7 @@ static int _http3_build_headers_payload(struct http_head *http_head, uint8_t *bu
 
 	if (http_head->data_len > 0 && http_head->data) {
 		char len_str[12];
-		sprintf(len_str, "%d", http_head->data_len);
+		snprintf(len_str, sizeof(len_str), "%d", http_head->data_len);
 		offset_ret = _qpack_build_header("content-length", len_str, buffer + offset, buffer_len - offset);
 		if (offset_ret < 0) {
 			return -1;
@@ -600,6 +600,14 @@ int http_head_parse_http3_0(struct http_head *http_head, const uint8_t *data, in
 					http_head->buff_len = 0;
 					return -3;
 				}
+				/* Check buffer space before memcpy */
+				if ((uint64_t)http_head->buff_len + frame_len > (uint64_t)http_head->buff_size) {
+					http_head->code_msg = "Receive Buffer Insufficient";
+					http_head->code = 500;
+					http_head->data_len = 0;
+					http_head->buff_len = 0;
+					return -3;
+				}
 				memcpy(http_head->buff + http_head->buff_len, data + offset, frame_len);
 				http_head->data_len += frame_len;
 			}
@@ -624,31 +632,52 @@ int http_head_serialize_http3_0(struct http_head *http_head, uint8_t *buffer, in
 {
 	int offset = 0;
 	int offset_ret = 0;
-	uint8_t header_data[1024];
+	uint8_t *header_data = NULL;
+	int header_data_size = 1024;
 	int header_data_len = 0;
+	int result = -1;
+
+	header_data = malloc(header_data_size);
+	if (!header_data) {
+		goto cleanup;
+	}
 
 	/* serialize header frame. */
-	header_data_len = _http3_build_headers_payload(http_head, header_data, sizeof(header_data));
+	header_data_len = _http3_build_headers_payload(http_head, header_data, header_data_size);
 	if (header_data_len < 0) {
-		return -1;
+		goto cleanup;
+	}
+
+	/* If header_data_len > header_data_size, realloc */
+	if (header_data_len > header_data_size) {
+		uint8_t *new_header_data = realloc(header_data, header_data_len);
+		if (!new_header_data) {
+			goto cleanup;
+		}
+		header_data = new_header_data;
+		header_data_size = header_data_len;
+		header_data_len = _http3_build_headers_payload(http_head, header_data, header_data_size);
+		if (header_data_len < 0) {
+			goto cleanup;
+		}
 	}
 
 	/* Frame Type: Header*/
 	offset_ret = _quicvarint_encode(HTTP3_HEADER_FRAME, buffer + offset, buffer_len - offset);
 	if (offset_ret < 0) {
-		return -1;
+		goto cleanup;
 	}
 	offset += offset_ret;
 
-	/* Header Frmae Length */
+	/* Header Frame Length */
 	offset_ret = _quicvarint_encode(header_data_len, buffer + offset, buffer_len - offset);
 	if (offset_ret < 0) {
-		return -1;
+		goto cleanup;
 	}
 	offset += offset_ret;
 
 	if (buffer_len - offset < header_data_len) {
-		return -1;
+		goto cleanup;
 	}
 	memcpy(buffer + offset, header_data, header_data_len);
 	offset += header_data_len;
@@ -658,17 +687,23 @@ int http_head_serialize_http3_0(struct http_head *http_head, uint8_t *buffer, in
 		/* Data Frame Length */
 		offset_ret = _quicvarint_encode(HTTP3_DATA_FRAME, buffer + offset, buffer_len - offset);
 		if (offset_ret < 0) {
-			return -1;
+			goto cleanup;
 		}
 		offset += offset_ret;
 
 		offset_ret =
 			http3_build_body_payload(http_head->data, http_head->data_len, buffer + offset, buffer_len - offset);
 		if (offset_ret < 0) {
-			return -1;
+			goto cleanup;
 		}
 		offset += offset_ret;
 	}
 
-	return offset;
+	result = offset;
+
+cleanup:
+	if (header_data) {
+		free(header_data);
+	}
+	return result;
 }

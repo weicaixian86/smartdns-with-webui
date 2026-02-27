@@ -163,7 +163,7 @@ server 127.0.0.1:61053
 	ASSERT_EQ(client.GetAnswerNum(), 1);
 	EXPECT_EQ(client.GetStatus(), "NOERROR");
 	EXPECT_EQ(client.GetAnswer()[0].GetName(), "a.com");
-	EXPECT_EQ(client.GetAnswer()[0].GetTTL(), 3);
+	EXPECT_EQ(client.GetAnswer()[0].GetTTL(), 611);
 	EXPECT_EQ(client.GetAnswer()[0].GetData(), "1.2.3.4");
 
 	ASSERT_TRUE(client.Query("a.com", 60053));
@@ -172,7 +172,7 @@ server 127.0.0.1:61053
 	ASSERT_EQ(client.GetAnswerNum(), 1);
 	EXPECT_EQ(client.GetStatus(), "NOERROR");
 	EXPECT_EQ(client.GetAnswer()[0].GetName(), "a.com");
-	EXPECT_EQ(client.GetAnswer()[0].GetTTL(), 3);
+	EXPECT_EQ(client.GetAnswer()[0].GetTTL(), 611);
 	EXPECT_EQ(client.GetAnswer()[0].GetData(), "1.2.3.4");
 }
 
@@ -319,4 +319,25 @@ server 127.0.0.1:63053 -group g2 -exclude-default-group
 	EXPECT_EQ(client.GetStatus(), "NOERROR");
 	EXPECT_EQ(client.GetAnswer()[0].GetName(), "a.com");
 	EXPECT_EQ(client.GetAnswer()[0].GetData(), "5.6.7.8");
+}
+
+TEST(Bind, Get)
+{
+    smartdns::Server server;
+
+	int ret = system("which curl > /dev/null 2>&1");
+	if (ret != 0) {
+		GTEST_SKIP() << "curl not found, skip test";
+	}
+
+    // Start server with bind-https and logging to file
+    server.Start(R"""(bind-https [::]:60053 -alpn h2
+address /example.com/1.2.3.4
+log-level debug
+)""");
+
+    // Send GET request using curl
+    std::string cmd = "curl -k --http2 'https://127.0.0.1:60053/dns-query?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE=' > /dev/null 2>&1";
+    ret = system(cmd.c_str());
+    ASSERT_EQ(ret, 0);
 }

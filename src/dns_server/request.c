@@ -20,6 +20,8 @@
 #include "address.h"
 #include "connection.h"
 #include "context.h"
+#include "ddr.h"
+#include "dns64.h"
 #include "dns_server.h"
 #include "dualstack.h"
 #include "mdns.h"
@@ -41,29 +43,12 @@ int _dns_server_has_bind_flag(struct dns_request *request, uint32_t flag)
 	return -1;
 }
 
-int _dns_server_is_dns64_request(struct dns_request *request)
-{
-	if (request->qtype != DNS_T_AAAA) {
-		return 0;
-	}
-
-	if (request->dualstack_selection_query == 1) {
-		return 0;
-	}
-
-	if (request->conf->dns_dns64.prefix_len <= 0) {
-		return 0;
-	}
-
-	return 1;
-}
-
 static int _dns_server_request_complete_with_all_IPs(struct dns_request *request, int with_all_ips)
 {
 	int ttl = 0;
 	struct dns_server_post_context context;
 
-	if (request->rcode == DNS_RC_SERVFAIL || request->rcode == DNS_RC_NXDOMAIN) {
+	if (request->rcode == DNS_RC_SERVFAIL) {
 		ttl = DNS_SERVER_FAIL_TTL;
 	}
 
@@ -166,10 +151,27 @@ static void _dns_server_delete_request(struct dns_request *request)
 	if (request->conn) {
 		_dns_server_conn_release(request->conn);
 	}
+
 	pthread_mutex_destroy(&request->ip_map_lock);
-	if (request->https_svcb) {
-		free(request->https_svcb);
+
+	struct dns_request_https *https_svcb, *tmp_https;
+	list_for_each_entry_safe(https_svcb, tmp_https, &request->https_svcb_list, list)
+	{
+		list_del(&https_svcb->list);
+		free(https_svcb);
 	}
+
+	struct dns_request_srv *srv, *tmp_srv;
+	list_for_each_entry_safe(srv, tmp_srv, &request->srv_list, list)
+	{
+		list_del(&srv->list);
+		free(srv);
+	}
+
+	if (request->original_domain) {
+		free(request->original_domain);
+	}
+
 	memset(request, 0, sizeof(*request));
 	free(request);
 	atomic_dec(&server.request_num);
@@ -396,6 +398,14 @@ int dns_server_request_is_blocked(struct dns_request *request)
 		return 0;
 	}
 
+	if (request->qtype == DNS_T_HTTPS || request->qtype == DNS_T_SVCB) {
+		uint32_t flags = _dns_server_get_rule_flags(request);
+		if (flags & DOMAIN_FLAG_ADDR_HTTPS_SOA) {
+			return 1;
+		}
+		return 0;
+	}
+
 	return _dns_server_is_return_soa(request);
 }
 
@@ -458,13 +468,11 @@ struct dns_request *_dns_server_new_request(void)
 {
 	struct dns_request *request = NULL;
 
-	request = malloc(sizeof(*request));
+	request = zalloc(1, sizeof(*request));
 	if (request == NULL) {
 		tlog(TLOG_ERROR, "malloc request failed.\n");
 		goto errout;
 	}
-
-	memset(request, 0, sizeof(*request));
 	pthread_mutex_init(&request->ip_map_lock, NULL);
 	atomic_set(&request->adblock, 0);
 	atomic_set(&request->soa_num, 0);
@@ -488,6 +496,8 @@ struct dns_request *_dns_server_new_request(void)
 	INIT_LIST_HEAD(&request->list);
 	INIT_LIST_HEAD(&request->pending_list);
 	INIT_LIST_HEAD(&request->check_list);
+	INIT_LIST_HEAD(&request->https_svcb_list);
+	INIT_LIST_HEAD(&request->srv_list);
 	hash_init(request->ip_map);
 	_dns_server_request_get(request);
 	atomic_add(1, &server.request_num);
@@ -639,21 +649,58 @@ void _dns_server_set_request_mdns(struct dns_request *request)
 	request->is_mdns_lookup = 1;
 }
 
-int _dns_server_process_DDR(struct dns_request *request)
+static int _dns_server_process_local_SOA(struct dns_request *request)
 {
-	return _dns_server_reply_SOA(DNS_RC_NOERROR, request);
+	struct dns_soa *soa = NULL;
+	char *mname = "ns.local";
+	char *rname = "admin.local";
+
+	if (strncasecmp("local", request->domain, DNS_MAX_CNAME_LEN) != 0) {
+		mname = "ns.lan";
+		rname = "admin.lan";
+		if (strncasecmp("lan", request->domain, DNS_MAX_CNAME_LEN) != 0) {
+			return -1;
+		}
+	}
+
+	soa = &request->soa;
+
+	safe_strncpy(soa->mname, mname, DNS_MAX_CNAME_LEN);
+	safe_strncpy(soa->rname, rname, DNS_MAX_CNAME_LEN);
+	soa->serial = 1;
+	soa->refresh = 3600;
+	soa->retry = 900;
+	soa->expire = 604800;
+	soa->minimum = 86400;
+
+	return _dns_server_reply_SOA_ext(DNS_RC_NOERROR, request);
 }
 
 int _dns_server_process_srv(struct dns_request *request)
 {
-	struct dns_srv_records *srv_records = dns_server_get_srv_record(request->domain);
-	if (srv_records == NULL) {
+	struct dns_srv_record *srv_record;
+	struct dns_request_srv *srv;
+	struct dns_srv_record_rule *srv_rule =
+		(struct dns_srv_record_rule *)_dns_server_get_dns_rule(request, DOMAIN_RULE_SRV);
+	if (srv_rule == NULL) {
 		return -1;
 	}
 
 	request->rcode = DNS_RC_NOERROR;
 	request->ip_ttl = _dns_server_get_local_ttl(request);
-	request->srv_records = srv_records;
+
+	list_for_each_entry(srv_record, &srv_rule->record_list, list)
+	{
+		srv = zalloc(1, sizeof(*srv));
+		if (srv == NULL) {
+			continue;
+		}
+		safe_strncpy(srv->host, srv_record->host, sizeof(srv->host));
+		srv->priority = srv_record->priority;
+		srv->weight = srv_record->weight;
+		srv->port = srv_record->port;
+		list_add_tail(&srv->list, &request->srv_list);
+	}
 
 	struct dns_server_post_context context;
 	_dns_server_post_context_init(&context, request);
@@ -824,141 +871,6 @@ const char *_dns_server_get_request_server_groupname(struct dns_request *request
 	return NULL;
 }
 
-static enum DNS_CHILD_POST_RESULT
-_dns_server_process_dns64_callback(struct dns_request *request, struct dns_request *child_request, int is_first_resp)
-{
-	unsigned long bucket = 0;
-	struct dns_ip_address *addr_map = NULL;
-	struct hlist_node *tmp = NULL;
-	uint32_t key = 0;
-	int addr_len = 0;
-
-	if (request->has_ip == 1) {
-		if (memcmp(request->ip_addr, request->conf->dns_dns64.prefix, 12) != 0) {
-			return DNS_CHILD_POST_SKIP;
-		}
-	}
-
-	if (child_request->qtype != DNS_T_A) {
-		return DNS_CHILD_POST_FAIL;
-	}
-
-	if (child_request->has_cname == 1) {
-		safe_strncpy(request->cname, child_request->cname, sizeof(request->cname));
-		request->has_cname = 1;
-		request->ttl_cname = child_request->ttl_cname;
-	}
-
-	if (child_request->has_ip == 0 && request->has_ip == 0) {
-		request->rcode = child_request->rcode;
-		if (child_request->has_soa) {
-			memcpy(&request->soa, &child_request->soa, sizeof(struct dns_soa));
-			request->has_soa = 1;
-			return DNS_CHILD_POST_SKIP;
-		}
-
-		if (request->has_soa == 0) {
-			_dns_server_setup_soa(request);
-			request->has_soa = 1;
-		}
-		return DNS_CHILD_POST_FAIL;
-	}
-
-	if (request->has_ip == 0 && child_request->has_ip == 1) {
-		request->rcode = child_request->rcode;
-		memcpy(request->ip_addr, request->conf->dns_dns64.prefix, 12);
-		memcpy(request->ip_addr + 12, child_request->ip_addr, 4);
-		request->ip_ttl = child_request->ip_ttl;
-		request->has_ip = 1;
-		request->has_soa = 0;
-	}
-
-	pthread_mutex_lock(&request->ip_map_lock);
-	hash_for_each_safe(request->ip_map, bucket, tmp, addr_map, node)
-	{
-		hash_del(&addr_map->node);
-		free(addr_map);
-	}
-	pthread_mutex_unlock(&request->ip_map_lock);
-
-	pthread_mutex_lock(&child_request->ip_map_lock);
-	hash_for_each_safe(child_request->ip_map, bucket, tmp, addr_map, node)
-	{
-		struct dns_ip_address *new_addr_map = NULL;
-
-		if (addr_map->addr_type == DNS_T_A) {
-			addr_len = DNS_RR_A_LEN;
-		} else {
-			continue;
-		}
-
-		new_addr_map = malloc(sizeof(struct dns_ip_address));
-		if (new_addr_map == NULL) {
-			tlog(TLOG_ERROR, "malloc failed.\n");
-			pthread_mutex_unlock(&child_request->ip_map_lock);
-			return DNS_CHILD_POST_FAIL;
-		}
-		memset(new_addr_map, 0, sizeof(struct dns_ip_address));
-
-		new_addr_map->addr_type = DNS_T_AAAA;
-		addr_len = DNS_RR_AAAA_LEN;
-		memcpy(new_addr_map->ip_addr, request->conf->dns_dns64.prefix, 16);
-		memcpy(new_addr_map->ip_addr + 12, addr_map->ip_addr, 4);
-
-		new_addr_map->ping_time = addr_map->ping_time;
-		key = jhash(new_addr_map->ip_addr, addr_len, 0);
-		key = jhash(&new_addr_map->addr_type, sizeof(new_addr_map->addr_type), key);
-		pthread_mutex_lock(&request->ip_map_lock);
-		hash_add(request->ip_map, &new_addr_map->node, key);
-		pthread_mutex_unlock(&request->ip_map_lock);
-	}
-	pthread_mutex_unlock(&child_request->ip_map_lock);
-
-	if (request->dualstack_selection == 1) {
-		return DNS_CHILD_POST_NO_RESPONSE;
-	}
-
-	return DNS_CHILD_POST_SKIP;
-}
-
-int _dns_server_process_dns64(struct dns_request *request)
-{
-	if (_dns_server_is_dns64_request(request) == 0) {
-		return 0;
-	}
-
-	tlog(TLOG_DEBUG, "query %s with dns64", request->domain);
-
-	struct dns_request *child_request =
-		_dns_server_new_child_request(request, request->domain, DNS_T_A, _dns_server_process_dns64_callback);
-	if (child_request == NULL) {
-		tlog(TLOG_ERROR, "malloc failed.\n");
-		return -1;
-	}
-
-	request->dualstack_selection = 0;
-	child_request->prefetch_flags |= PREFETCH_FLAGS_NO_DUALSTACK;
-	request->request_wait++;
-	int ret = _dns_server_do_query(child_request, 0);
-	if (ret != 0) {
-		request->request_wait--;
-		tlog(TLOG_ERROR, "do query %s type %d failed.\n", request->domain, request->qtype);
-		goto errout;
-	}
-
-	_dns_server_request_release_complete(child_request, 0);
-	return 0;
-
-errout:
-
-	if (child_request) {
-		request->child_request = NULL;
-		_dns_server_request_release(child_request);
-	}
-
-	return -1;
-}
-
 int _dns_server_get_expired_ttl_reply(struct dns_request *request, struct dns_cache *dns_cache)
 {
 	int ttl = dns_cache_get_ttl(dns_cache);
@@ -972,50 +884,62 @@ int _dns_server_get_expired_ttl_reply(struct dns_request *request, struct dns_ca
 int _dns_server_process_https_svcb(struct dns_request *request)
 {
 	struct dns_https_record_rule *https_record_rule = _dns_server_get_dns_rule(request, DOMAIN_RULE_HTTPS);
+	struct dns_https_record *record;
+	struct dns_request_https *svcb;
 
 	if (request->qtype != DNS_T_HTTPS) {
 		return 0;
 	}
 
-	if (request->https_svcb != NULL) {
+	if (!list_empty(&request->https_svcb_list)) {
 		return 0;
 	}
-
-	request->https_svcb = malloc(sizeof(*request->https_svcb));
-	if (request->https_svcb == NULL) {
-		return -1;
-	}
-	memset(request->https_svcb, 0, sizeof(*request->https_svcb));
 
 	if (https_record_rule == NULL) {
 		return 0;
 	}
 
-	if (https_record_rule->record.enable == 0) {
-		return 0;
+	list_for_each_entry(record, &https_record_rule->record_list, list)
+	{
+		if (record->enable == 0) {
+			continue;
+		}
+
+		svcb = zalloc(1, sizeof(*svcb));
+		if (svcb == NULL) {
+			continue;
+		}
+
+		safe_strncpy(svcb->domain, request->domain, sizeof(svcb->domain));
+		safe_strncpy(svcb->target, record->target, sizeof(svcb->target));
+		svcb->priority = record->priority;
+		svcb->port = record->port;
+		memcpy(svcb->ech, record->ech, record->ech_len);
+		svcb->ech_len = record->ech_len;
+		memcpy(svcb->alpn, record->alpn, sizeof(svcb->alpn));
+		svcb->alpn_len = record->alpn_len;
+
+		if (record->has_ipv4) {
+			svcb->has_ipv4 = 1;
+			memcpy(svcb->ipv4_addr, record->ipv4_addr, sizeof(svcb->ipv4_addr));
+			request->has_ip = 1;
+		}
+
+		if (record->has_ipv6) {
+			svcb->has_ipv6 = 1;
+			memcpy(svcb->ipv6_addr, record->ipv6_addr, sizeof(svcb->ipv6_addr));
+			request->has_ip = 1;
+		}
+
+		list_add_tail(&svcb->list, &request->https_svcb_list);
 	}
 
-	safe_strncpy(request->https_svcb->domain, request->domain, sizeof(request->https_svcb->domain));
-	safe_strncpy(request->https_svcb->target, https_record_rule->record.target, sizeof(request->https_svcb->target));
-	request->https_svcb->priority = https_record_rule->record.priority;
-	request->https_svcb->port = https_record_rule->record.port;
-	memcpy(request->https_svcb->ech, https_record_rule->record.ech, https_record_rule->record.ech_len);
-	request->https_svcb->ech_len = https_record_rule->record.ech_len;
-	memcpy(request->https_svcb->alpn, https_record_rule->record.alpn, sizeof(request->https_svcb->alpn));
-	request->https_svcb->alpn_len = https_record_rule->record.alpn_len;
-	if (https_record_rule->record.has_ipv4) {
-		memcpy(request->ip_addr, https_record_rule->record.ipv4_addr, DNS_RR_A_LEN);
-		request->ip_addr_type = DNS_T_A;
-		request->has_ip = 1;
-	} else if (https_record_rule->record.has_ipv6) {
-		memcpy(request->ip_addr, https_record_rule->record.ipv6_addr, DNS_RR_AAAA_LEN);
-		request->ip_addr_type = DNS_T_AAAA;
-		request->has_ip = 1;
+	if (!list_empty(&request->https_svcb_list)) {
+		request->rcode = DNS_RC_NOERROR;
+		return -1;
 	}
 
-	request->rcode = DNS_RC_NOERROR;
-
-	return -1;
+	return 0;
 }
 
 void _dns_server_request_set_client(struct dns_request *request, struct dns_server_conn_head *conn)
@@ -1074,20 +998,12 @@ void _dns_server_request_set_callback(struct dns_request *request, dns_result_ca
 
 int _dns_server_process_smartdns_domain(struct dns_request *request)
 {
-	struct dns_rule_flags *rule_flag = NULL;
-	unsigned int flags = 0;
-
-	/* get domain rule flag */
-	rule_flag = _dns_server_get_dns_rule(request, DOMAIN_RULE_FLAGS);
-	if (rule_flag == NULL) {
-		return -1;
-	}
+	uint32_t flags = _dns_server_get_rule_flags(request);
 
 	if (_dns_server_is_dns_rule_extract_match(request, DOMAIN_RULE_FLAGS) == 0) {
 		return -1;
 	}
 
-	flags = rule_flag->flags;
 	if (!(flags & DOMAIN_FLAG_SMARTDNS_DOMAIN)) {
 		return -1;
 	}
@@ -1101,6 +1017,15 @@ int _dns_server_process_special_query(struct dns_request *request)
 
 	switch (request->qtype) {
 	case DNS_T_PTR:
+		break;
+	case DNS_T_SOA:
+		ret = _dns_server_process_local_SOA(request);
+		if (ret == 0) {
+			goto clean_exit;
+		} else {
+			/* pass to upstream server */
+			request->passthrough = 1;
+		}
 		break;
 	case DNS_T_SRV:
 		ret = _dns_server_process_srv(request);
@@ -1270,6 +1195,7 @@ int _dns_server_setup_request_conf_pre(struct dns_request *request)
 	if (group_rule == NULL) {
 		return 0;
 	}
+
 	rule_group = dns_server_get_rule_group(group_rule->group_name);
 	if (rule_group == NULL) {
 		return 0;
@@ -1356,7 +1282,20 @@ int _dns_server_parser_request(struct dns_request *request, struct dns_packet *p
 		}
 
 		// Only support one question.
-		safe_strncpy(request->domain, domain, sizeof(request->domain));
+		int case_changed = 0;
+		safe_strncpy_lower(request->domain, domain, sizeof(request->domain), &case_changed);
+
+		/* support draft dns0x20 */
+		if (case_changed) {
+			request->original_domain = malloc(DNS_MAX_CNAME_LEN);
+			if (request->original_domain == NULL) {
+				tlog(TLOG_ERROR, "malloc failed.\n");
+				goto errout;
+			}
+
+			safe_strncpy(request->original_domain, domain, DNS_MAX_CNAME_LEN);
+			tlog(TLOG_DEBUG, "query %s by origin domain %s", request->domain, request->original_domain);
+		}
 		request->qtype = qtype;
 		break;
 	}

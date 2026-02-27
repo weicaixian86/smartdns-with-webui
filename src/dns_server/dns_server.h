@@ -26,6 +26,7 @@
 #include "smartdns/dns.h"
 #include "smartdns/dns_conf.h"
 #include "smartdns/dns_server.h"
+#include "smartdns/http2.h"
 #include "smartdns/tlog.h"
 #include "smartdns/util.h"
 
@@ -45,7 +46,8 @@ extern "C" {
 #define DNS_CONN_BUFF_SIZE 4096
 #define DNS_REQUEST_MAX_TIMEOUT 950
 #define DNS_PING_TIMEOUT (DNS_REQUEST_MAX_TIMEOUT)
-#define DNS_PING_CHECK_INTERVAL (250)
+#define DNS_PING_CHECK_INTERVAL (100)
+#define DNS_PING_RTT_CHECK_THRESHOLD (100 * 10)
 #define DNS_PING_SECOND_TIMEOUT (DNS_REQUEST_MAX_TIMEOUT - DNS_PING_CHECK_INTERVAL)
 #define SOCKET_IP_TOS (IPTOS_LOWDELAY | IPTOS_RELIABILITY)
 #define SOCKET_PRIORITY (6)
@@ -75,6 +77,7 @@ typedef enum {
 	DNS_CONN_TYPE_TLS_CLIENT,
 	DNS_CONN_TYPE_HTTPS_SERVER,
 	DNS_CONN_TYPE_HTTPS_CLIENT,
+	DNS_CONN_TYPE_HTTP2_STREAM,
 } DNS_CONN_TYPE;
 
 typedef enum DNS_CHILD_POST_RESULT {
@@ -87,6 +90,7 @@ typedef enum DNS_CHILD_POST_RESULT {
 struct rule_walk_args {
 	void *args;
 	int rule_index;
+	uint32_t full_key_len;
 	unsigned char *key[DOMAIN_RULE_MAX];
 	uint32_t key_len[DOMAIN_RULE_MAX];
 };
@@ -211,6 +215,8 @@ struct dns_server_conn_tls_client {
 	SSL *ssl;
 	int ssl_want_write;
 	pthread_mutex_t ssl_lock;
+	void *http2_ctx;
+	char alpn_selected[32];
 };
 
 /* ip address lists of domain */
@@ -235,6 +241,7 @@ struct dns_request_pending_list {
 };
 
 struct dns_request_domain_rule {
+	uint32_t flags;
 	struct dns_rule *rules[DOMAIN_RULE_MAX];
 	int is_sub_rule[DOMAIN_RULE_MAX];
 };
@@ -243,6 +250,7 @@ typedef DNS_CHILD_POST_RESULT (*child_request_callback)(struct dns_request *requ
 														int is_first_resp);
 
 struct dns_request_https {
+	struct list_head list;
 	char domain[DNS_MAX_CNAME_LEN];
 	char target[DNS_MAX_CNAME_LEN];
 	int ttl;
@@ -252,6 +260,19 @@ struct dns_request_https {
 	int port;
 	char ech[DNS_MAX_ECH_LEN];
 	int ech_len;
+	
+	int has_ipv4;
+	unsigned char ipv4_addr[DNS_RR_A_LEN];
+	int has_ipv6;
+	unsigned char ipv6_addr[DNS_RR_AAAA_LEN];
+};
+
+struct dns_request_srv {
+	struct list_head list;
+	char host[DNS_MAX_CNAME_LEN];
+	unsigned short priority;
+	unsigned short weight;
+	unsigned short port;
 };
 
 struct dns_request {
@@ -272,6 +293,7 @@ struct dns_request {
 
 	/* dns query */
 	char domain[DNS_MAX_CNAME_LEN];
+	char *original_domain;
 	dns_type_t qtype;
 	int qclass;
 	unsigned long send_tick;
@@ -292,7 +314,7 @@ struct dns_request {
 	struct dns_opt_ecs ecs;
 	int edns0_do;
 
-	struct dns_request_https *https_svcb;
+	struct list_head https_svcb_list;
 
 	dns_result_callback result_callback;
 	void *user_ptr;
@@ -320,7 +342,7 @@ struct dns_request {
 
 	int is_cache_reply;
 
-	struct dns_srv_records *srv_records;
+	struct list_head srv_list;
 
 	atomic_t notified;
 	atomic_t do_callback;
