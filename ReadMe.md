@@ -12,7 +12,7 @@ SmartDNS官网：[https://pymumu.github.io/smartdns](https://pymumu.github.io/sm
 cd /tmp
 apt install ./smartdns.1.2025.09.02-1245.amd64.deb
 ```
-4、修改配置文件/root/smartdns/smartdns.conf内容如下  
+4、修改配置文件/etc/smartdns/smartdns.conf内容如下  
 ```
 # DNS服务器名称
 server-name smartdns
